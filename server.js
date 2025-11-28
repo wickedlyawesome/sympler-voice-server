@@ -81,7 +81,7 @@ wss.on('connection', async (twilioWs) => {
                         try {
                             const r = JSON.parse(msg);
                             if (r.type === 'session.updated' && agent.voice_greeting) {
-                                openaiWs.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Greet: ' + agent.voice_greeting }] } }));
+                                openaiWs.send(JSON.stringify({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: agent.voice_greeting }] } }));
                                 openaiWs.send(JSON.stringify({ type: 'response.create' }));
                             }
                             if (r.type === 'response.audio.delta' && r.delta) {
