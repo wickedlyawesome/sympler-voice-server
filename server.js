@@ -14,46 +14,58 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocket.Server({ server });
 
 console.log('Voice WebSocket server starting...');
-
 function extractLeadData(transcriptParts) {
-    const fullText = transcriptParts.map(p => p.text).join(' ').toLowerCase();
     const leadData = {};
     
     for (let i = 0; i < transcriptParts.length; i++) {
         const part = transcriptParts[i];
         if (part.role === 'user') {
-            const text = part.text;
+            const text = part.text.trim();
+            const textLower = text.toLowerCase();
             
-            if (i > 0) {
-                const prevAssistant = transcriptParts[i-1]?.text?.toLowerCase() || '';
-                
-                if (prevAssistant.includes('who am i speaking with') || 
-                    prevAssistant.includes('your name') ||
-                    prevAssistant.includes('who i am speaking with')) {
-                    const nameParts = text.trim().replace(/[.,!?]/g, '').split(' ');
-                    if (nameParts.length >= 1) {
-                        leadData.first_name = nameParts[0];
-                        if (nameParts.length >= 2) {
-                            leadData.last_name = nameParts.slice(1).join(' ');
-                        }
+            // Check previous assistant message for context
+            const prevText = i > 0 ? (transcriptParts[i-1]?.text?.toLowerCase() || '') : '';
+            
+            // Name extraction - after "who am I speaking with" or similar
+            if (prevText.includes('speaking with') || prevText.includes('your name') || prevText.includes('may i ask who')) {
+                const cleaned = text.replace(/^(my name is |i'm |this is |it's |i am )/i, '').replace(/[.,!?]/g, '').trim();
+                const nameParts = cleaned.split(' ');
+                if (nameParts.length >= 1 && nameParts[0].length > 1) {
+                    leadData.first_name = nameParts[0].charAt(0).toUpperCase() + nameParts[0].slice(1).toLowerCase();
+                    if (nameParts.length >= 2) {
+                        leadData.last_name = nameParts.slice(1).map(n => n.charAt(0).toUpperCase() + n.slice(1).toLowerCase()).join(' ');
                     }
                 }
-                
-                if (prevAssistant.includes('phone number') || prevAssistant.includes('call you')) {
-                    const phoneMatch = text.match(/[\d\-\(\)\s\+]{7,}/);
-                    if (phoneMatch) {
-                        leadData.phone = phoneMatch[0].trim();
-                    }
+            }
+            
+            // Company extraction - "I'm with X" or "from X" or after company question
+            const companyMatch = text.match(/(?:i'm with|i am with|from|at|work for|company is|business is)\s+(.+?)(?:\.|,|and|$)/i);
+            if (companyMatch && companyMatch[1].length > 1 && companyMatch[1].length < 50) {
+                leadData.company = companyMatch[1].trim();
+            }
+            if (prevText.includes('company') || prevText.includes('business')) {
+                if (!textLower.includes('no ') && text.length > 1 && text.length < 50) {
+                    leadData.company = leadData.company || text.replace(/[.,!?]/g, '').trim();
                 }
-                
-                if (prevAssistant.includes('email')) {
-                    const emailMatch = text.match(/[\w\.-]+@[\w\.-]+\.\w+/i);
-                    if (emailMatch) {
-                        leadData.email = emailMatch[0];
-                    }
-                }
-                
-                if (prevAssistant.includes('company') || prevAssistant.includes('business')) {
+            }
+            
+            // Phone extraction
+            const phoneMatch = text.match(/(\+?1?[-.\s]?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})/);
+            if (phoneMatch) {
+                leadData.phone = phoneMatch[1].replace(/[^\d+]/g, '');
+            }
+            
+            // Email extraction
+            const emailMatch = text.match(/[\w.-]+@[\w.-]+\.\w+/i);
+            if (emailMatch) {
+                leadData.email = emailMatch[0].toLowerCase();
+            }
+        }
+    }
+    
+    console.log('Extracted lead data:', leadData);
+    return leadData;
+}
                     if (!text.toLowerCase().includes('no ') && text.length < 100) {
                         leadData.company = text.trim();
                     }
