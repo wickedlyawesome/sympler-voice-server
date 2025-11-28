@@ -15,6 +15,56 @@ const wss = new WebSocket.Server({ server });
 
 console.log('Voice WebSocket server starting...');
 
+function extractLeadData(transcriptParts) {
+    const fullText = transcriptParts.map(p => p.text).join(' ').toLowerCase();
+    const leadData = {};
+    
+    for (let i = 0; i < transcriptParts.length; i++) {
+        const part = transcriptParts[i];
+        if (part.role === 'user') {
+            const text = part.text;
+            
+            if (i > 0) {
+                const prevAssistant = transcriptParts[i-1]?.text?.toLowerCase() || '';
+                
+                if (prevAssistant.includes('who am i speaking with') || 
+                    prevAssistant.includes('your name') ||
+                    prevAssistant.includes('who i am speaking with')) {
+                    const nameParts = text.trim().replace(/[.,!?]/g, '').split(' ');
+                    if (nameParts.length >= 1) {
+                        leadData.first_name = nameParts[0];
+                        if (nameParts.length >= 2) {
+                            leadData.last_name = nameParts.slice(1).join(' ');
+                        }
+                    }
+                }
+                
+                if (prevAssistant.includes('phone number') || prevAssistant.includes('call you')) {
+                    const phoneMatch = text.match(/[\d\-\(\)\s\+]{7,}/);
+                    if (phoneMatch) {
+                        leadData.phone = phoneMatch[0].trim();
+                    }
+                }
+                
+                if (prevAssistant.includes('email')) {
+                    const emailMatch = text.match(/[\w\.-]+@[\w\.-]+\.\w+/i);
+                    if (emailMatch) {
+                        leadData.email = emailMatch[0];
+                    }
+                }
+                
+                if (prevAssistant.includes('company') || prevAssistant.includes('business')) {
+                    if (!text.toLowerCase().includes('no ') && text.length < 100) {
+                        leadData.company = text.trim();
+                    }
+                }
+            }
+        }
+    }
+    
+    return leadData;
+}
+
 wss.on('connection', async (twilioWs, req) => {
     console.log('New Twilio connection');
 
@@ -35,7 +85,7 @@ wss.on('connection', async (twilioWs, req) => {
                     agentId = customParams.agent_id;
                     callSid = customParams.call_sid;
 
-                    console.log(`Call started - Agent: ${agentId}, CallSid: ${callSid}`);
+                    console.log(`Call started - Agent: ${agentId}, CallSid: ${callSid}, StreamSid: ${streamSid}`);
 
                     const agentConfig = await fetchAgentConfig(agentId);
                     if (!agentConfig || !agentConfig.agent) {
@@ -47,7 +97,7 @@ wss.on('connection', async (twilioWs, req) => {
                     const agent = agentConfig.agent;
                     const knowledgeBase = agentConfig.knowledge_base || '';
 
-                    console.log('Connecting to OpenAI...');
+                    console.log('Agent loaded:', agent.agent_name, 'Voice:', agent.voice_id);
 
                     openaiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
                         headers: {
@@ -80,34 +130,39 @@ wss.on('connection', async (twilioWs, req) => {
                             }
                         };
                         openaiWs.send(JSON.stringify(sessionConfig));
-                        console.log('Session config sent');
-
-                        setTimeout(() => {
-                            if (agent.voice_greeting) {
-                                console.log('Sending greeting:', agent.voice_greeting);
-                                const greetingEvent = {
-                                    type: 'conversation.item.create',
-                                    item: {
-                                        type: 'message',
-                                        role: 'user',
-                                        content: [{
-                                            type: 'input_text',
-                                            text: 'Please greet the caller with: ' + agent.voice_greeting
-                                        }]
-                                    }
-                                };
-                                openaiWs.send(JSON.stringify(greetingEvent));
-                                openaiWs.send(JSON.stringify({ type: 'response.create' }));
-                            }
-                        }, 500);
+                        console.log('Session config sent with voice:', agent.voice_id);
                     });
 
                     openaiWs.on('message', (openaiMessage) => {
                         try {
                             const response = JSON.parse(openaiMessage);
 
+                            if (response.type === 'session.created') {
+                                console.log('Session created');
+                            }
+
+                            if (response.type === 'session.updated') {
+                                console.log('Session updated, sending greeting...');
+                                if (agent.voice_greeting) {
+                                    const greetingEvent = {
+                                        type: 'conversation.item.create',
+                                        item: {
+                                            type: 'message',
+                                            role: 'user',
+                                            content: [{
+                                                type: 'input_text',
+                                                text: 'Please greet the caller with: ' + agent.voice_greeting
+                                            }]
+                                        }
+                                    };
+                                    openaiWs.send(JSON.stringify(greetingEvent));
+                                    openaiWs.send(JSON.stringify({ type: 'response.create' }));
+                                    console.log('Greeting request sent');
+                                }
+                            }
+
                             if (response.type === 'error') {
-                                console.error('OpenAI error:', response.error);
+                                console.error('OpenAI error:', JSON.stringify(response.error));
                             }
 
                             if (response.type === 'response.audio.delta' && response.delta) {
@@ -135,11 +190,11 @@ wss.on('connection', async (twilioWs, req) => {
                     });
 
                     openaiWs.on('error', (err) => {
-                        console.error('OpenAI WebSocket error:', err);
+                        console.error('OpenAI WebSocket error:', err.message);
                     });
 
-                    openaiWs.on('close', () => {
-                        console.log('OpenAI connection closed');
+                    openaiWs.on('close', (code, reason) => {
+                        console.log('OpenAI connection closed, code:', code);
                     });
 
                     break;
@@ -157,7 +212,9 @@ wss.on('connection', async (twilioWs, req) => {
                 case 'stop':
                     console.log('Call ended');
                     if (callSid && transcriptParts.length > 0) {
-                        await saveTranscript(callSid, transcriptParts);
+                        const leadData = extractLeadData(transcriptParts);
+                        console.log('Extracted lead data:', leadData);
+                        await saveTranscript(callSid, transcriptParts, leadData);
                     }
                     if (openaiWs) {
                         openaiWs.close();
@@ -172,7 +229,9 @@ wss.on('connection', async (twilioWs, req) => {
     twilioWs.on('close', async () => {
         console.log('Twilio connection closed');
         if (callSid && transcriptParts.length > 0) {
-            await saveTranscript(callSid, transcriptParts);
+            const leadData = extractLeadData(transcriptParts);
+            console.log('Extracted lead data:', leadData);
+            await saveTranscript(callSid, transcriptParts, leadData);
         }
         if (openaiWs) {
             openaiWs.close();
@@ -200,7 +259,7 @@ async function fetchAgentConfig(agentId) {
     }
 }
 
-async function saveTranscript(callSid, transcriptParts) {
+async function saveTranscript(callSid, transcriptParts, leadData = {}) {
     try {
         const transcript = transcriptParts.map(p => `${p.role}: ${p.text}`).join('\n');
         const response = await fetch(`${API_BASE_URL}/api/voice/save-transcript.php`, {
@@ -209,10 +268,12 @@ async function saveTranscript(callSid, transcriptParts) {
             body: JSON.stringify({
                 key: API_KEY,
                 call_sid: callSid,
-                transcript: transcript
+                transcript: transcript,
+                lead_data: leadData
             })
         });
-        console.log('Transcript saved for call:', callSid);
+        const result = await response.json();
+        console.log('Transcript saved for call:', callSid, result);
     } catch (err) {
         console.error('Error saving transcript:', err);
     }
