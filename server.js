@@ -17,7 +17,7 @@ console.log('Voice WebSocket server starting...');
 
 wss.on('connection', async (twilioWs, req) => {
     console.log('New Twilio connection');
-    
+
     let openaiWs = null;
     let streamSid = null;
     let agentId = null;
@@ -34,9 +34,9 @@ wss.on('connection', async (twilioWs, req) => {
                     const customParams = data.start.customParameters || {};
                     agentId = customParams.agent_id;
                     callSid = customParams.call_sid;
-                    
+
                     console.log(`Call started - Agent: ${agentId}, CallSid: ${callSid}`);
-                    
+
                     const agentConfig = await fetchAgentConfig(agentId);
                     if (!agentConfig || !agentConfig.agent) {
                         console.error('Agent not found');
@@ -46,7 +46,9 @@ wss.on('connection', async (twilioWs, req) => {
 
                     const agent = agentConfig.agent;
                     const knowledgeBase = agentConfig.knowledge_base || '';
-                    
+
+                    console.log('Connecting to OpenAI...');
+
                     openaiWs = new WebSocket('wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01', {
                         headers: {
                             'Authorization': `Bearer ${OPENAI_API_KEY}`,
@@ -56,12 +58,12 @@ wss.on('connection', async (twilioWs, req) => {
 
                     openaiWs.on('open', () => {
                         console.log('Connected to OpenAI Realtime API');
-                        
+
                         let systemPrompt = agent.system_prompt || 'You are a helpful assistant.';
                         if (knowledgeBase) {
                             systemPrompt += '\n\nKnowledge Base:\n' + knowledgeBase;
                         }
-                        
+
                         const sessionConfig = {
                             type: 'session.update',
                             session: {
@@ -71,32 +73,43 @@ wss.on('connection', async (twilioWs, req) => {
                                 voice: agent.voice_id || 'alloy',
                                 instructions: systemPrompt,
                                 modalities: ['text', 'audio'],
-                                temperature: 0.8
+                                temperature: 0.8,
+                                input_audio_transcription: {
+                                    model: 'whisper-1'
+                                }
                             }
                         };
                         openaiWs.send(JSON.stringify(sessionConfig));
+                        console.log('Session config sent');
 
-                        if (agent.voice_greeting) {
-                            const greetingEvent = {
-                                type: 'conversation.item.create',
-                                item: {
-                                    type: 'message',
-                                    role: 'assistant',
-                                    content: [{
-                                        type: 'input_text',
-                                        text: agent.voice_greeting
-                                    }]
-                                }
-                            };
-                            openaiWs.send(JSON.stringify(greetingEvent));
-                            openaiWs.send(JSON.stringify({ type: 'response.create' }));
-                        }
+                        setTimeout(() => {
+                            if (agent.voice_greeting) {
+                                console.log('Sending greeting:', agent.voice_greeting);
+                                const greetingEvent = {
+                                    type: 'conversation.item.create',
+                                    item: {
+                                        type: 'message',
+                                        role: 'user',
+                                        content: [{
+                                            type: 'input_text',
+                                            text: 'Please greet the caller with: ' + agent.voice_greeting
+                                        }]
+                                    }
+                                };
+                                openaiWs.send(JSON.stringify(greetingEvent));
+                                openaiWs.send(JSON.stringify({ type: 'response.create' }));
+                            }
+                        }, 500);
                     });
 
                     openaiWs.on('message', (openaiMessage) => {
                         try {
                             const response = JSON.parse(openaiMessage);
-                            
+
+                            if (response.type === 'error') {
+                                console.error('OpenAI error:', response.error);
+                            }
+
                             if (response.type === 'response.audio.delta' && response.delta) {
                                 const audioMessage = {
                                     event: 'media',
@@ -107,10 +120,12 @@ wss.on('connection', async (twilioWs, req) => {
                             }
 
                             if (response.type === 'response.audio_transcript.done') {
+                                console.log('Assistant said:', response.transcript);
                                 transcriptParts.push({ role: 'assistant', text: response.transcript });
                             }
 
                             if (response.type === 'conversation.item.input_audio_transcription.completed') {
+                                console.log('User said:', response.transcript);
                                 transcriptParts.push({ role: 'user', text: response.transcript });
                             }
 
@@ -172,8 +187,12 @@ wss.on('connection', async (twilioWs, req) => {
 async function fetchAgentConfig(agentId) {
     try {
         const url = `${API_BASE_URL}/api/voice/agent-config.php?agent_id=${agentId}&key=${API_KEY}`;
+        console.log('Fetching agent config from:', url);
         const response = await fetch(url);
-        if (!response.ok) return null;
+        if (!response.ok) {
+            console.error('Agent config response not ok:', response.status);
+            return null;
+        }
         return await response.json();
     } catch (err) {
         console.error('Error fetching agent config:', err);
